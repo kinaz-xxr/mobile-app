@@ -1,4 +1,5 @@
 // AuthContext.tsx
+import { axiosInstance } from "@/requests/axiosConfig";
 import type { Admin } from "@/requests/admin";
 import { getAdminProfile } from "@/requests/admin";
 import type { Hacker } from "@/requests/hacker";
@@ -74,6 +75,17 @@ export const AuthProvider = ({ children }: AuthProviderProps) => {
   const signOut = useCallback(async () => {
     try {
       haptics.impactAsync(ImpactFeedbackStyle.Medium);
+      try {
+        if ((await getUserType()) === "judge") {
+          const tokens = await getAuthTokens();
+          if (tokens?.refresh_token)
+            await axiosInstance.post("/api/v13/judges/logout", {
+              refresh_token: tokens.refresh_token,
+            });
+        }
+      } catch {
+        /* Local sign-out still clears credentials during an outage. */
+      }
       await removeAuthTokens();
       setUserToken(null);
       setIsFirstSignIn(false);

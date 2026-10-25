@@ -51,15 +51,15 @@ const RegisterJudge = () => {
       // Store sponsor PIN for fetching project data
       await storeSponsorPin(parseInt(pin || "0"));
 
-      // Store auth tokens (using same token for both access and refresh)
-      await storeAuthTokens(result.token, result.token);
+      // Store the rotating judge session token pair.
+      await storeAuthTokens(result.access_token, result.refresh_token);
 
       // Store user type as judge
       await storeUserType("judge");
 
       // Update auth context
       if (authContext?.signIn) {
-        await authContext.signIn(result.token, result.token);
+        await authContext.signIn(result.access_token, result.refresh_token);
       }
 
       Toast.show({

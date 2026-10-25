@@ -35,6 +35,8 @@ export interface JudgeLoginRequest {
 
 export interface JudgeLoginResponse {
   token: string;
+  access_token: string;
+  refresh_token: string;
 }
 
 export interface JudgeRegisterRequest {
@@ -43,6 +45,8 @@ export interface JudgeRegisterRequest {
 }
 
 export interface JudgeRegisterResponse {
+  access_token: string;
+  refresh_token: string;
   judge_name: string;
   company_id: number;
   judge_id: number;

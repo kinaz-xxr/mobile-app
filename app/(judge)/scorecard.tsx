@@ -1,688 +1,310 @@
-import { ScoringSlider } from "@/components/ScoringSlider";
-import { useTheme } from "@/context/themeContext";
-import {
-  computeRemainingSecondsFromTimer,
-  useTimer,
-} from "@/context/timerContext";
-import { isFeatureEnabled } from "@/config/featureFlags";
-import { useJudgeSchedules } from "@/queries/judging";
-import { useSubmitScore } from "@/queries/scoring";
-import { SCORING_CRITERIA_INFO, ScoringCriteria } from "@/types/scoring";
-import { haptics, ImpactFeedbackStyle } from "@/utils/haptics";
-import { formatLocationForDisplay } from "@/utils/judging";
-import { cn, getThemeStyles } from "@/utils/theme";
-import {
-  getJudgeId,
-  getProjectScores,
-  storeProjectScores,
-} from "@/utils/tokens/secureStorage";
-import { useFocusEffect } from "@react-navigation/native";
-import { Href, router, useLocalSearchParams } from "expo-router";
-import { ChevronLeft } from "lucide-react-native";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
-  Modal,
-  Platform,
   Pressable,
   ScrollView,
   Text,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import Toast from "react-native-toast-message";
+import { router, useLocalSearchParams } from "expo-router";
+import * as Crypto from "expo-crypto";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  getOwnScores,
+  saveWeightedScore,
+  type SavedScore,
+} from "@/requests/weightedScoring";
+import {
+  CRITERIA,
+  weightedTotal,
+  type RawScores,
+} from "@/types/weightedScoring";
 
-const Scorecard = () => {
-  const { isDark } = useTheme();
-  const themeStyles = getThemeStyles(isDark);
-  const params = useLocalSearchParams();
-  const timerContext = useTimer();
-  const timerSyncEnabled = isFeatureEnabled("ENABLE_JUDGE_TIMERS");
+export default function Scorecard() {
+  const params = useLocalSearchParams<{ projectId: string }>();
+  const projectId = Number(params.projectId);
+  const queryClient = useQueryClient();
+  const [saved, setSaved] = useState<SavedScore | null>(null);
+  const [values, setValues] = useState<Partial<RawScores>>({});
+  const [checks, setChecks] = useState<boolean[]>([
+    false,
+    false,
+    false,
+    false,
+    false,
+  ]);
+  const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [conflict, setConflict] = useState(false);
+  const [message, setMessage] = useState("");
+  const loadGeneration = useRef(0);
+  const [loadedProjectId, setLoadedProjectId] = useState<number | null>(null);
+  const pending = useRef<{ fingerprint: string; id: string } | null>(null);
+  const inFlight = useRef(false);
 
-  const [judgeId, setJudgeId] = useState<number | null>(null);
-  const [scheduleId, setScheduleId] = useState<number | null>(null);
-  const [showAllTags, setShowAllTags] = useState(false);
-  const [nowTs, setNowTs] = useState(Date.now());
-  const [hasSubmitted, setHasSubmitted] = useState(false);
-  const [showWebSubmitConfirm, setShowWebSubmitConfirm] = useState(false);
-
-  const [scores, setScores] = useState<ScoringCriteria>({
-    design: 0,
-    completion: 0,
-    theme_relevance: 0,
-    idea_innovation: 0,
-    technology: 0,
-    pitching: 0,
-    time_management: 0,
-  });
-
-  const submitScoreMutation = useSubmitScore();
-
-  // Load data from params/storage
-  useEffect(() => {
-    const loadData = async () => {
-      const storedJudgeId = await getJudgeId();
-      setJudgeId(storedJudgeId);
-
-      if (params.scheduleId && typeof params.scheduleId === "string") {
-        setScheduleId(parseInt(params.scheduleId));
-      }
-    };
-    loadData();
-  }, [params]);
-
-  const {
-    data: judgeSchedules,
-    refetch: refetchJudgeSchedules,
-    isFetching: isFetchingJudgeSchedules,
-    isLoading: isLoadingJudgeSchedules,
-    isError: isJudgeSchedulesError,
-  } = useJudgeSchedules(judgeId, !!judgeId);
-
-  // Keep now ticking locally for countdown/auto-submit
-  useEffect(() => {
-    const id = setInterval(() => setNowTs(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  // Refetch schedules when screen gains focus
-  useFocusEffect(
-    useCallback(() => {
-      if (refetchJudgeSchedules) {
-        refetchJudgeSchedules();
-      }
-    }, [refetchJudgeSchedules])
-  );
-
-  const currentSchedule = useMemo(() => {
-    if (!judgeSchedules || !scheduleId) return null;
-    return judgeSchedules.find((s) => s.judging_schedule_id === scheduleId);
-  }, [judgeSchedules, scheduleId]);
-
-  const project = currentSchedule?.team?.project;
-  const projectNameForDisplay = project?.project_name || "this project";
-  const projectId = useMemo(() => {
-    if (project?.project_id) return project.project_id;
-    if (params.projectId && typeof params.projectId === "string") {
-      return parseInt(params.projectId);
-    }
-    return null;
-  }, [params.projectId, project?.project_id]);
-
-  // Load saved scores when component mounts or project changes
-  useEffect(() => {
-    const loadSavedScores = async () => {
-      if (!judgeId || !projectId) return;
-
-      const savedScores = await getProjectScores(judgeId, projectId);
-      if (savedScores) {
-        setScores(savedScores);
-        setHasSubmitted(true);
-      } else {
-        // Reset to default scores if no saved scores found
-        setScores({
-          design: 0,
-          completion: 0,
-          theme_relevance: 0,
-          idea_innovation: 0,
-          technology: 0,
-          pitching: 0,
-          time_management: 0,
-        });
-        setHasSubmitted(false);
-      }
-    };
-
-    loadSavedScores();
-  }, [judgeId, projectId]);
-
-  const locationName = currentSchedule
-    ? formatLocationForDisplay(currentSchedule.location)
-    : "";
-
-  // Note: Room timer is now managed by WebSocket listener (useJudgeTimerWebSocket)
-  // No need to hydrate here - the WebSocket will update roomTimers in real-time
-
-  // Calculate total score
-  const totalScore = Object.values(scores).reduce((sum, val) => sum + val, 0);
-  const maxScore = 27; // Design(3) + Completion(4) + Theme(3) + Innovation(5) + Tech(5) + Pitching(5) + Time(2)
-  const submitConfirmationMessage = `You are about to submit a score of ${totalScore}/${maxScore} for ${projectNameForDisplay}. This action cannot be undone.`;
-
-  const roomTimer =
-    timerSyncEnabled && locationName
-      ? timerContext.roomTimers[locationName]
-      : undefined;
-  const remainingSeconds = timerSyncEnabled
-    ? computeRemainingSecondsFromTimer(roomTimer, nowTs)
-    : null;
-  const timerStatusLabel =
-    timerSyncEnabled && roomTimer?.status === "paused"
-      ? "Timer paused by admin"
-      : timerSyncEnabled && roomTimer?.status === "stopped"
-        ? "Timer ended by admin"
-        : null;
-  const canEditScores = timerSyncEnabled
-    ? !!roomTimer && roomTimer.status === "running" && !hasSubmitted
-    : !hasSubmitted;
-  const isSliderDisabled = timerSyncEnabled ? !canEditScores : hasSubmitted; // Lock sliders when timer is paused/stopped or scores are submitted
-  const submitDisabled = timerSyncEnabled
-    ? submitScoreMutation.isPending ||
-      hasSubmitted ||
-      !roomTimer ||
-      roomTimer.status !== "running"
-    : submitScoreMutation.isPending || hasSubmitted;
-
-  // Auto-submit when timer hits zero and not already submitted
-  useEffect(() => {
-    if (
-      remainingSeconds === null ||
-      remainingSeconds > 0 ||
-      hasSubmitted ||
-      submitScoreMutation.isPending
-    ) {
-      return;
-    }
-    // Trigger auto submission
-    submitScores(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [remainingSeconds, hasSubmitted, submitScoreMutation.isPending]);
-
-  const handleScoreChange = (
-    criterion: keyof ScoringCriteria,
-    value: number
-  ) => {
-    if (!canEditScores) return;
-    setScores((prev) => ({ ...prev, [criterion]: value }));
-  };
-  const submitScores = async (isAuto: boolean) => {
-    if (!project || !projectId || hasSubmitted || !judgeId) return;
-
+  const load = useCallback(async () => {
+    const generation = ++loadGeneration.current;
+    setLoading(true);
+    setLoadFailed(false);
     try {
-      if (!isAuto) {
-        haptics.impactAsync(ImpactFeedbackStyle.Heavy);
+      if (!Number.isSafeInteger(projectId) || projectId <= 0)
+        throw new Error("Invalid project");
+      const scores = await getOwnScores();
+      if (generation !== loadGeneration.current) return;
+      setLoadedProjectId(projectId);
+      const score = scores.find((s) => s.project_id === projectId) ?? null;
+      setSaved(score);
+      setConflict(false);
+      pending.current = null;
+      setValues(score?.rubric_version === 2 ? score.scores : {});
+      setChecks(score?.pitching_checks ?? [false, false, false, false, false]);
+      setMessage(
+        score?.rubric_version === 1
+          ? "An organizer must migrate this project's previous-rubric score before it can be edited."
+          : ""
+      );
+    } catch {
+      if (generation !== loadGeneration.current) return;
+      setLoadFailed(true);
+      setMessage(
+        "Could not load your saved score. Check your connection or sign in again."
+      );
+    } finally {
+      if (generation === loadGeneration.current) setLoading(false);
+    }
+  }, [projectId]);
+  useEffect(() => {
+    load();
+    return () => {
+      loadGeneration.current += 1;
+    };
+  }, [load]);
+  const legacy = saved?.rubric_version === 1;
+  const complete =
+    loadedProjectId === projectId &&
+    CRITERIA.every(
+      (c) =>
+        Number.isInteger(values[c.key]) &&
+        (values[c.key] ?? -1) >= (c.key === "pitching" ? 0 : 1) &&
+        (values[c.key] ?? 6) <= 5
+    ) &&
+    [1, 2, 3, 5].includes(values.time ?? -1);
+
+  async function submit() {
+    if (!complete || inFlight.current || loadFailed || conflict || legacy)
+      return;
+    inFlight.current = true;
+    setBusy(true);
+    const generation = loadGeneration.current;
+    const scores = values as RawScores;
+    const fingerprint = JSON.stringify({ scores, checks });
+    if (pending.current?.fingerprint !== fingerprint)
+      pending.current = { fingerprint, id: Crypto.randomUUID() };
+    try {
+      const result = await saveWeightedScore(
+        projectId,
+        scores,
+        checks,
+        saved?.revision ?? 0,
+        pending.current.id
+      );
+      if (generation !== loadGeneration.current) {
+        await queryClient.invalidateQueries({ queryKey: ["judge-own-scores"] });
+        return;
       }
-
-      const submissionData = {
-        project_id: projectId,
-        design: scores.design,
-        completion: scores.completion,
-        theme_relevance: scores.theme_relevance,
-        idea_innovation: scores.idea_innovation,
-        technicality: scores.technology,
-        pitching: scores.pitching,
-        time: scores.time_management,
-      };
-
-      await submitScoreMutation.mutateAsync(submissionData);
-      setHasSubmitted(true);
-
-      // Save scores to local storage
-      await storeProjectScores(judgeId, projectId, scores);
-
-      Toast.show({
-        type: "success",
-        text1: isAuto ? "Auto-submitted" : "Scores Submitted!",
-        text2: `Scored ${project.project_name}`,
-      });
-
-      // Only navigate if this is an auto-submit (timer expired)
-      // If submitted early, keep judge on scorecard until timer expires
-      if (isAuto) {
-        // Navigate to next project only if its round has started
-        if (judgeSchedules && scheduleId) {
-          const sortedSchedules = [...judgeSchedules].sort(
-            (a, b) =>
-              new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-          );
-
-          const currentIndex = sortedSchedules.findIndex(
-            (s) => s.judging_schedule_id === scheduleId
-          );
-
-          if (currentIndex >= 0 && currentIndex < sortedSchedules.length - 1) {
-            const nextSchedule = sortedSchedules[currentIndex + 1];
-            router.replace({
-              pathname: "/(judge)/projectOverview",
-              params: {
-                teamId: nextSchedule.team_id,
-                scheduleId: nextSchedule.judging_schedule_id,
-              },
-            });
-          } else {
-            router.replace("/(judge)/complete" as Href);
-          }
-        } else {
-          router.replace("/(judge)/complete" as Href);
-        }
-      }
+      setSaved(result);
+      pending.current = null;
+      setMessage("Score saved. You can continue editing.");
+      await queryClient.invalidateQueries({ queryKey: ["judge-own-scores"] });
     } catch (error: any) {
-      console.error("[ERROR] Score submission failed:", {
-        message: error?.message,
-        response: error?.response?.data,
-        detail: JSON.stringify(error?.response?.data?.detail, null, 2),
-        status: error?.response?.status,
-        fullError: error,
-      });
-
-      let errorMessage = "Unable to submit scores. Please try again.";
-
-      if (error?.response?.data?.detail) {
-        const detail = error.response.data.detail;
-        if (Array.isArray(detail) && detail.length > 0) {
-          errorMessage =
-            detail[0]?.msg || detail[0]?.message || JSON.stringify(detail[0]);
-        } else if (typeof detail === "string") {
-          errorMessage = detail;
-        }
-      } else if (error?.response?.data?.message) {
-        errorMessage = error.response.data.message;
-      } else if (error?.message) {
-        errorMessage = error.message;
-      }
-
-      Toast.show({
-        type: "error",
-        text1: "Submission Failed",
-        text2: errorMessage,
-      });
+      if (generation !== loadGeneration.current) return;
+      if (error?.response?.status === 409) {
+        setConflict(true);
+        setMessage(
+          "This score changed on another device or uses the previous rubric. Load the saved score before editing."
+        );
+      } else
+        setMessage(
+          "Could not confirm the save. Retry to check the same request, or load the saved score. Your changes remain on this screen."
+        );
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
     }
-  };
-
-  const handleSubmit = () => {
-    if (
-      !project ||
-      !projectId ||
-      hasSubmitted ||
-      (timerSyncEnabled && (!roomTimer || roomTimer.status !== "running"))
-    )
-      return;
-
-    const confirmationMessage = `You are about to submit a score of ${totalScore}/${maxScore} for ${projectNameForDisplay}. This action cannot be undone.`;
-
-    if (Platform.OS === "web") {
-      setShowWebSubmitConfirm(true);
-      return;
-    }
-
-    Alert.alert("Submit Scores?", confirmationMessage, [
-      {
-        text: "Cancel",
-        onPress: () => haptics.impactAsync(ImpactFeedbackStyle.Light),
-        style: "cancel",
-      },
-      {
-        text: "Submit",
-        onPress: () => submitScores(false),
-      },
-    ]);
-  };
-
-  const handleCancelSubmit = () => {
-    setShowWebSubmitConfirm(false);
-    haptics.impactAsync(ImpactFeedbackStyle.Light);
-  };
-
-  const handleConfirmSubmit = () => {
-    setShowWebSubmitConfirm(false);
-    submitScores(false);
-  };
-
-  const submitConfirmationModal = (
-    <Modal
-      animationType="fade"
-      transparent
-      visible={showWebSubmitConfirm}
-      onRequestClose={handleCancelSubmit}
-    >
-      <View className="flex-1 bg-black/60 justify-center items-center px-6">
-        <View
-          className={cn(
-            "w-full p-6 rounded-2xl",
-            isDark ? "bg-uoft_dark_mode_card" : "bg-white"
-          )}
-          style={{ maxWidth: 480 }}
-        >
-          <Text
-            className={cn(
-              "text-xl mb-2 font-onest-bold",
-              themeStyles.primaryText
-            )}
-          >
-            Submit Scores?
-          </Text>
-          <Text className={cn("text-base mb-6", themeStyles.secondaryText)}>
-            {submitConfirmationMessage}
-          </Text>
-          <View className="flex-row justify-end gap-3">
-            <Pressable
-              onPress={handleCancelSubmit}
-              className="px-4 py-3 rounded-xl border border-gray-300"
-            >
-              <Text className={cn("text-base font-onest-bold text-center")}>
-                Cancel
-              </Text>
-            </Pressable>
-            <Pressable
-              onPress={handleConfirmSubmit}
-              className={cn(
-                "px-4 py-3 rounded-xl",
-                isDark ? "bg-[#75EDEF]" : "bg-[#132B38]"
-              )}
-            >
-              <Text
-                className={cn(
-                  "text-base font-onest-bold text-center",
-                  isDark ? "text-black" : "text-white"
-                )}
-              >
-                Submit
-              </Text>
-            </Pressable>
-          </View>
-        </View>
-      </View>
-    </Modal>
-  );
-
-  const handleGoBack = () => {
-    haptics.impactAsync(ImpactFeedbackStyle.Light);
-    router.back();
-  };
-
-  if (isLoadingJudgeSchedules) {
-    return (
-      <SafeAreaView className={cn("flex-1", themeStyles.background)}>
-        <View className="flex-1 justify-center items-center">
-          <ActivityIndicator
-            size="large"
-            color={isDark ? "#FFFFFF" : "#002A5C"}
-          />
-          <Text
-            className={cn("mt-4 text-base font-pp", themeStyles.secondaryText)}
-          >
-            Loading scorecard...
-          </Text>
-        </View>
-      </SafeAreaView>
-    );
   }
-
-  if (isJudgeSchedulesError || !currentSchedule || !project || !projectId) {
-    return (
-      <SafeAreaView className={cn("flex-1", themeStyles.background)}>
-        <View className="flex-1 justify-center items-center px-6">
-          <Text
-            className={cn(
-              "text-lg font-onest-bold mb-2",
-              themeStyles.primaryText
-            )}
-          >
-            Project Not Found
-          </Text>
-          <Text
-            className={cn(
-              "text-base font-pp text-center",
-              themeStyles.secondaryText
-            )}
-          >
-            Unable to load project details. Please try again.
-          </Text>
-          <Pressable
-            onPress={handleGoBack}
-            className={cn(
-              "mt-6 px-6 py-3 rounded-xl",
-              isDark ? "bg-[#75EDEF]" : "bg-[#132B38]"
-            )}
-          >
-            <Text
-              className={cn(
-                "text-base font-onest-bold",
-                isDark ? "text-black" : "text-white"
-              )}
-            >
-              Go Back
-            </Text>
-          </Pressable>
-        </View>
-        {submitConfirmationModal}
-      </SafeAreaView>
-    );
-  }
-
-  const visibleTags = showAllTags
-    ? project.categories
-    : project.categories.slice(0, 3);
 
   return (
-    <SafeAreaView className={cn("flex-1", themeStyles.background)}>
-      <ScrollView className="flex-1 px-6">
-        {/* Header */}
-        <View className="mt-6 mb-4">
-          <Pressable onPress={handleGoBack}>
-            <ChevronLeft size={24} color={isDark ? "#fff" : "#000"} />
-          </Pressable>
-        </View>
-
-        {/* Project Name */}
-        <View className="mb-4">
-          <Text
-            className={cn("text-2xl font-onest-bold", themeStyles.primaryText)}
-          >
-            {project.project_name}
-          </Text>
-        </View>
-
-        {/* Timer / status */}
-        <View className="mb-4">
-          {timerSyncEnabled ? (
-            roomTimer ? (
-              <View className="flex-row items-center justify-between">
-                <Text
-                  className={cn("text-sm font-pp", themeStyles.secondaryText)}
-                >
-                  Time remaining
-                </Text>
-                <Text
-                  className={cn(
-                    "text-2xl font-onest-bold",
-                    themeStyles.primaryText
-                  )}
-                >
-                  {remainingSeconds !== null
-                    ? `${Math.floor((remainingSeconds || 0) / 60)
-                        .toString()
-                        .padStart(2, "0")}:${((remainingSeconds || 0) % 60)
-                        .toString()
-                        .padStart(2, "0")}`
-                    : "--:--"}
-                </Text>
-              </View>
-            ) : (
-              <Text
-                className={cn("text-sm font-pp", themeStyles.secondaryText)}
-              >
-                Waiting for admin to start the timer for this room.
-              </Text>
-            )
-          ) : (
-            <Text className={cn("text-sm font-pp", themeStyles.secondaryText)}>
-              Timer sync is off; you can score whenever you are ready.
-            </Text>
-          )}
-          {timerStatusLabel && (
-            <Text
-              className={cn("text-xs font-pp mt-1", themeStyles.secondaryText)}
-            >
-              {timerStatusLabel}
-            </Text>
-          )}
-          {hasSubmitted && (
-            <Text
-              className={cn("text-sm font-pp mt-2", themeStyles.secondaryText)}
-            >
-              Scoring completed. Waiting for next round.
-            </Text>
-          )}
-          {isFetchingJudgeSchedules && (
-            <Text
-              className={cn("text-xs font-pp mt-1", themeStyles.secondaryText)}
-            >
-              Syncing latest timer...
-            </Text>
-          )}
-        </View>
-
-        {/* Categories/Tags with See More */}
-        {project.categories && project.categories.length > 0 && (
-          <View className="mb-6">
-            <View className="flex-row flex-wrap gap-2 mb-2">
-              {visibleTags.map((category, index) => (
-                <View
-                  key={index}
-                  className={cn(
-                    "px-3 py-1.5 rounded-full",
-                    isDark ? "bg-[#303030]" : "bg-gray-200"
-                  )}
-                >
-                  <Text
-                    className={cn("text-sm font-pp", themeStyles.primaryText)}
-                  >
-                    {category}
-                  </Text>
-                </View>
-              ))}
-            </View>
-            {project.categories.length > 3 && (
-              <Pressable
-                onPress={() => {
-                  haptics.impactAsync(ImpactFeedbackStyle.Light);
-                  setShowAllTags(!showAllTags);
+    <SafeAreaView style={{ flex: 1, backgroundColor: "#f9f9f9" }}>
+      <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 48 }}>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => router.back()}
+          style={{ paddingVertical: 12 }}
+        >
+          <Text style={{ color: "#21516b" }}>Back to project</Text>
+        </Pressable>
+        <Text
+          style={{
+            color: "#1b1b1b",
+            fontSize: 26,
+            fontWeight: "600",
+            marginTop: 16,
+          }}
+        >
+          {saved ? "Edit your score" : "Score project"}
+        </Text>
+        <Text style={{ color: "#585858", marginTop: 8 }}>
+          Weighted total: {complete ? weightedTotal(values as RawScores) : "?"}
+          /100. You can edit after saving.
+        </Text>
+        {loading ? (
+          <ActivityIndicator style={{ margin: 24 }} />
+        ) : (
+          <View>
+            {CRITERIA.map((c) => (
+              <View
+                key={c.key}
+                style={{
+                  borderBottomWidth: 1,
+                  borderBottomColor: "#d7d7d7",
+                  paddingVertical: 24,
                 }}
               >
                 <Text
-                  className={cn(
-                    "text-sm font-pp",
-                    isDark ? "text-[#75EDEF]" : "text-[#132B38]"
-                  )}
+                  style={{ fontSize: 18, fontWeight: "600", color: "#1b1b1b" }}
                 >
-                  {showAllTags ? "See Less" : "See More"}
+                  {c.label}: {c.weight}%
                 </Text>
-              </Pressable>
-            )}
+                <Text
+                  style={{ marginTop: 8, lineHeight: 22, color: "#585858" }}
+                >
+                  {c.description}
+                </Text>
+                {c.key === "pitching" ? (
+                  <View>
+                    {c.levels.map((level, i) => (
+                      <Pressable
+                        accessibilityRole="checkbox"
+                        accessibilityState={{
+                          checked: checks[i],
+                          disabled: busy || loadFailed || legacy || conflict,
+                        }}
+                        disabled={busy || loadFailed || legacy || conflict}
+                        key={level.value}
+                        onPress={() => {
+                          const next = [...checks];
+                          next[i] = !next[i];
+                          setChecks(next);
+                          setValues((v) => ({
+                            ...v,
+                            pitching: next.filter(Boolean).length,
+                          }));
+                        }}
+                        style={{
+                          padding: 14,
+                          marginTop: 8,
+                          borderRadius: 8,
+                          backgroundColor: checks[i] ? "#bff6ff" : "white",
+                        }}
+                      >
+                        <Text style={{ color: "#1b1b1b" }}>
+                          {checks[i] ? "[x] " : "[ ] "}
+                          {level.text}
+                        </Text>
+                      </Pressable>
+                    ))}
+                    {values.pitching === undefined && (
+                      <Pressable
+                        onPress={() => {
+                          setChecks([false, false, false, false, false]);
+                          setValues((v) => ({ ...v, pitching: 0 }));
+                        }}
+                      >
+                        <Text style={{ color: "#21516b", paddingVertical: 16 }}>
+                          None met (0/5)
+                        </Text>
+                      </Pressable>
+                    )}
+                  </View>
+                ) : (
+                  c.levels.map((level) => (
+                    <Pressable
+                      accessibilityRole="radio"
+                      accessibilityState={{
+                        checked: values[c.key] === level.value,
+                        disabled: busy || loadFailed || legacy || conflict,
+                      }}
+                      disabled={busy || loadFailed || legacy || conflict}
+                      key={level.value}
+                      onPress={() =>
+                        setValues((v) => ({ ...v, [c.key]: level.value }))
+                      }
+                      style={{
+                        padding: 14,
+                        marginTop: 8,
+                        borderRadius: 8,
+                        backgroundColor:
+                          values[c.key] === level.value ? "#bff6ff" : "white",
+                      }}
+                    >
+                      <Text style={{ color: "#1b1b1b", lineHeight: 22 }}>
+                        {level.value}: {level.text}
+                      </Text>
+                    </Pressable>
+                  ))
+                )}
+              </View>
+            ))}
           </View>
         )}
-
-        {/* Total Score Display */}
-        <View className="mb-6">
-          <View className="flex-row justify-between items-center">
-            <Text
-              className={cn(
-                "text-4xl font-onest-bold",
-                themeStyles.primaryText
-              )}
-            >
-              {totalScore}/{maxScore}
-            </Text>
-          </View>
-        </View>
-
-        {/* Scoring Sliders */}
-        <View className="mb-6">
-          <ScoringSlider
-            label="Design"
-            value={scores.design}
-            onChange={(val) => handleScoreChange("design", val)}
-            criteriaInfo={SCORING_CRITERIA_INFO.design}
-            min={0}
-            max={3}
-            disabled={isSliderDisabled}
-          />
-          <ScoringSlider
-            label="Completion"
-            value={scores.completion}
-            onChange={(val) => handleScoreChange("completion", val)}
-            criteriaInfo={SCORING_CRITERIA_INFO.completion}
-            min={0}
-            max={4}
-            disabled={isSliderDisabled}
-          />
-          <ScoringSlider
-            label="Theme Relevance"
-            value={scores.theme_relevance}
-            onChange={(val) => handleScoreChange("theme_relevance", val)}
-            criteriaInfo={SCORING_CRITERIA_INFO.theme_relevance}
-            min={0}
-            max={3}
-            disabled={isSliderDisabled}
-          />
-          <ScoringSlider
-            label="Idea & Innovation"
-            value={scores.idea_innovation}
-            onChange={(val) => handleScoreChange("idea_innovation", val)}
-            criteriaInfo={SCORING_CRITERIA_INFO.idea_innovation}
-            min={0}
-            max={5}
-            disabled={isSliderDisabled}
-          />
-          <ScoringSlider
-            label="Technicality"
-            value={scores.technology}
-            onChange={(val) => handleScoreChange("technology", val)}
-            criteriaInfo={SCORING_CRITERIA_INFO.technology}
-            min={0}
-            max={5}
-            disabled={isSliderDisabled}
-          />
-          <ScoringSlider
-            label="Pitching"
-            value={scores.pitching}
-            onChange={(val) => handleScoreChange("pitching", val)}
-            criteriaInfo={SCORING_CRITERIA_INFO.pitching}
-            min={0}
-            max={5}
-            disabled={isSliderDisabled}
-          />
-          <ScoringSlider
-            label="Time"
-            value={scores.time_management}
-            onChange={(val) => handleScoreChange("time_management", val)}
-            criteriaInfo={SCORING_CRITERIA_INFO.time_management}
-            min={0}
-            max={2}
-            disabled={isSliderDisabled}
-          />
-        </View>
-
-        {/* Submit Button */}
+        {!!message && (
+          <Text
+            accessibilityLiveRegion="polite"
+            style={{
+              marginVertical: 18,
+              color: conflict || loadFailed ? "#82181a" : "#21516b",
+              lineHeight: 22,
+            }}
+          >
+            {message}
+          </Text>
+        )}
         <Pressable
-          onPress={handleSubmit}
-          disabled={submitDisabled}
-          className={cn(
-            "py-4 rounded-xl mb-8",
-            isDark ? "bg-[#75EDEF]" : "bg-[#132B38]"
-          )}
+          accessibilityRole="button"
+          disabled={
+            loading || busy || !complete || loadFailed || legacy || conflict
+          }
+          onPress={submit}
           style={{
-            opacity: submitDisabled ? 0.6 : 1,
+            marginTop: 24,
+            borderRadius: 8,
+            backgroundColor: "#21516b",
+            opacity:
+              loading || busy || !complete || loadFailed || legacy || conflict
+                ? 0.5
+                : 1,
+            padding: 16,
           }}
         >
           <Text
-            className={cn(
-              "text-center text-lg font-onest-bold",
-              isDark ? "text-black" : "text-white"
-            )}
+            style={{ color: "white", textAlign: "center", fontWeight: "600" }}
           >
-            {hasSubmitted
-              ? "Submitted"
-              : submitScoreMutation.isPending
-                ? "Submitting..."
-                : "Submit"}
+            {busy ? "Saving..." : saved ? "Save changes" : "Save score"}
+          </Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          disabled={busy}
+          onPress={load}
+          style={{ paddingVertical: 18 }}
+        >
+          <Text style={{ color: "#21516b", textAlign: "center" }}>
+            Load saved score
           </Text>
         </Pressable>
       </ScrollView>
-      {submitConfirmationModal}
     </SafeAreaView>
   );
-};
-
-export default Scorecard;
+}

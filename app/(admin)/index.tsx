@@ -1,3 +1,5 @@
+import { useQuery } from "@tanstack/react-query";
+import { getOwnScores } from "@/requests/weightedScoring";
 import { FEATURE_FLAGS } from "@/config/featureFlags";
 import { useAuth } from "@/context/authContext";
 import { useTheme } from "@/context/themeContext";
@@ -25,11 +27,7 @@ import {
 import { Calendar, MoneyWavy } from "phosphor-react-native";
 import { useMemo, useEffect, useState } from "react";
 import { Pressable, Text, View, ScrollView, Image } from "react-native";
-import {
-  getUserType,
-  getJudgeId,
-  getProjectScores,
-} from "@/utils/tokens/secureStorage";
+import { getUserType, getJudgeId } from "@/utils/tokens/secureStorage";
 import { PlatformSafeArea } from "@/components/common/PlatformSafeArea";
 import UoftDeerBlack from "../../assets/images/icons/uoft-deer-black.svg";
 import UoftDeerWhite from "../../assets/images/icons/uoft-deer-white.svg";
@@ -427,7 +425,22 @@ const UpcomingEvents = ({
   const isJudge = userType === "judge";
   const isVolunteer = userType === "volunteer";
   const [judgeId, setJudgeId] = useState<number | null>(null);
-  const [scoredProjects, setScoredProjects] = useState<Set<number>>(new Set());
+  const { data: recordedScores = [] } = useQuery({
+    queryKey: ["judge-own-scores", judgeId],
+    queryFn: getOwnScores,
+    enabled: isJudge && judgeId !== null,
+    staleTime: 0,
+    refetchInterval: isJudge ? 15000 : false,
+  });
+  const scoredProjects = useMemo(
+    () =>
+      new Set(
+        recordedScores
+          .filter((s) => s.rubric_version === 2)
+          .map((s) => s.project_id)
+      ),
+    [recordedScores]
+  );
   const { isDark } = useTheme();
 
   // Get judge ID for filtering
@@ -514,46 +527,6 @@ const UpcomingEvents = ({
   }, [isJudge, judgeSchedules, hackerSchedules, currentTime]);
 
   // Create a stable key from schedule IDs to prevent infinite loops
-  const scheduleKey = useMemo(() => {
-    if (!judgeSchedules) return "";
-    return judgeSchedules
-      .map((s) => s.judging_schedule_id)
-      .sort()
-      .join(",");
-  }, [judgeSchedules]);
-
-  // Check which projects have been scored (judges only)
-  useEffect(() => {
-    if (
-      !isJudge ||
-      !judgeId ||
-      !judgeSchedules ||
-      judgeSchedules.length === 0
-    ) {
-      setScoredProjects(new Set());
-      return;
-    }
-
-    const checkScoredProjects = async () => {
-      const scored = new Set<number>();
-
-      for (const schedule of judgeSchedules) {
-        const projectId = schedule.team?.project?.project_id;
-        if (projectId) {
-          const savedScores = await getProjectScores(judgeId, projectId);
-          if (savedScores) {
-            scored.add(projectId);
-          }
-        }
-      }
-
-      setScoredProjects(scored);
-    };
-
-    checkScoredProjects();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isJudge, judgeId, scheduleKey]);
-
   const formatEventTime = (startTime: string, endTime: string) => {
     const start = new Date(startTime);
     const end = new Date(endTime);

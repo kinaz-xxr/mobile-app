@@ -21,6 +21,9 @@ const ENDPOINTS_WITHOUT_AUTH = [
   "/api/v13/hackers/refresh",
   "/api/v13/judges/sponsor-by-pin",
   "/api/v13/judges/login",
+  "/api/v13/judges/session",
+  "/api/v13/judges/refresh",
+  "/api/v13/judges/logout",
 ] as const;
 
 export const axiosInstance: AxiosInstance = axios.create({
@@ -132,11 +135,14 @@ axiosInstance.interceptors.response.use(
     const isAuthError =
       error.response?.status === 401 || error.response?.status === 403;
     const isTokenEndpoint =
+      originalRequest.url?.includes("/api/v13/judges/refresh") ||
+      originalRequest.url?.includes("/api/v13/judges/logout") ||
       originalRequest.url?.includes("/api/v13/admins/refresh") ||
       originalRequest.url?.includes("/api/v13/hackers/refresh");
     const isLoginEndpoint =
       originalRequest.url?.includes("/api/v13/admins/login") ||
       originalRequest.url?.includes("/api/v13/hackers/login") ||
+      originalRequest.url?.includes("/api/v13/judges/session") ||
       originalRequest.url?.includes("/api/v13/judges/login") ||
       originalRequest.url?.includes("/api/v13/judges/sponsor-by-pin");
 
@@ -175,20 +181,17 @@ axiosInstance.interceptors.response.use(
           const tokens = await getAuthTokens();
           const userType = await getUserType();
 
-          // Judges don't have a refresh token endpoint, so fail early
-          if (userType === "judge") {
-            throw new Error("Judges do not support token refresh");
-          }
-
           if (!tokens?.refresh_token) {
             throw new Error("No refresh token available");
           }
 
           // Use the correct refresh endpoint based on user type
           const refreshEndpoint =
-            userType === "hacker"
-              ? "/api/v13/hackers/refresh"
-              : "/api/v13/admins/refresh";
+            userType === "judge"
+              ? "/api/v13/judges/refresh"
+              : userType === "hacker"
+                ? "/api/v13/hackers/refresh"
+                : "/api/v13/admins/refresh";
 
           const refreshResponse = await axiosInstance.post(refreshEndpoint, {
             refresh_token: tokens.refresh_token,

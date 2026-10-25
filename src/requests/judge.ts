@@ -14,7 +14,7 @@ import { HackerProfile } from "./hacker";
 
 export const judgeEndpoints = {
   SPONSOR_BY_PIN: "/api/v13/judges/sponsor-by-pin",
-  LOGIN: "/api/v13/judges/login",
+  LOGIN: "/api/v13/judges/session",
   REGISTER: "/api/v13/admins/judges/register",
   GET_SCHEDULES: "/api/v13/judges/{judge_id}/schedules",
   SAVE_HACKER: "/api/v13/judges/save-hacker/{hacker_id}",
@@ -46,7 +46,7 @@ export const judgeLogin = async (
     judgeEndpoints.LOGIN,
     credentials
   );
-  return response.data;
+  return { ...response.data, token: response.data.access_token };
 };
 
 /**
@@ -59,7 +59,11 @@ export const registerJudge = async (
     judgeEndpoints.REGISTER,
     registrationData
   );
-  return response.data;
+  const tokens = await judgeLogin({
+    pin: registrationData.pin,
+    judge_id: response.data.judge_id,
+  });
+  return { ...response.data, ...tokens };
 };
 
 /**

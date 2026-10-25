@@ -11,7 +11,6 @@ const parseEnvFlag = (value: string | undefined, fallback: boolean) => {
 };
 
 // Allow overriding select flags via env vars (e.g., Cloudflare Pages Variables)
-const envEnableJudgeTimers = process.env.EXPO_PUBLIC_ENABLE_JUDGE_TIMERS;
 const envEnablePhotoboothNav = process.env.EXPO_PUBLIC_ENABLE_PHOTOBOOTH_NAV;
 
 export const FEATURE_FLAGS = {
@@ -31,7 +30,7 @@ export const FEATURE_FLAGS = {
 
   // Judging features
   ENABLE_JUDGING: true,
-  ENABLE_JUDGE_TIMERS: parseEnvFlag(envEnableJudgeTimers, true),
+  ENABLE_JUDGE_TIMERS: false,
 
   // Other features
   ENABLE_PUSH_NOTIFICATIONS: true,
