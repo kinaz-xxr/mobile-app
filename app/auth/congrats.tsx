@@ -40,7 +40,7 @@ const Onboarding = () => {
               themeStyles.primaryText
             )}
           >
-            You been accepted into UofT Hacks 13!
+            You have been accepted into UofTHacks 14!
           </Text>
         </View>
 
